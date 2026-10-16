@@ -1,0 +1,35 @@
+# Claude Code 忽略清单 —— 这些内容不参与上下文扫描 / 检索
+# 语法同 .gitignore（支持 * ? ** 和 ! 取反）
+
+# 依赖与虚拟环境（1.3G，纯噪声）
+venv/
+.venv/
+env/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 密钥（绝对不要读取）
+.env
+.env.local
+*.pem
+*.key
+
+# 数据与索引产物（二进制 / 可重建）
+data/*.db
+data/*.sqlite*
+data/profiles_cache.json
+
+# 评测与日志输出
+eval_report.json
+*.log
+*.jsonl
+
+# IDE 与 OS
+.idea/
+.vscode/
+.DS_Store
+
+# 版本控制内部
+.git/

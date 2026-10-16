@@ -1,7 +1,62 @@
+# ============================================================
+# ai-recruiter — .gitignore
+# 分区：Python / 虚拟环境 / 密钥 / 数据产物 / 评测输出 / IDE / OS
+# ============================================================
+
+# ---------- Python 字节码与缓存 ----------
 __pycache__/
-*.pyc
-.env
-data/recruit.db
-data/profiles_cache.json
-eval_report.json
+*.py[cod]
+*$py.class
+*.so
+
+# ---------- 虚拟环境（项目内置 venv，约 1.3G，切勿入库） ----------
+venv/
 .venv/
+env/
+ENV/
+
+# ---------- 构建与分发产物 ----------
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---------- 测试 / 类型检查 / 格式化缓存 ----------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# ---------- 密钥与本地配置（.env.example 为例外，需入库） ----------
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+*.p12
+
+# ---------- 数据产物（可由 scripts/init_data.py / index_data.py 重建） ----------
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/profiles_cache.json
+
+# ---------- 评测与调试输出 ----------
+eval_report.json
+*.log
+logs/
+*.jsonl
+
+# ---------- IDE ----------
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db

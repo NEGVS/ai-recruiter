@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./venv/**)",
+      "Read(./.git/**)",
+      "Read(./data/recruit.db)",
+      "Read(./data/*.db)",
+      "Read(./data/profiles_cache.json)",
+      "Read(./eval_report.json)"
+    ],
+    "ask": [
+      "Bash(rm -rf:*)",
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)"
+    ]
+  }
+}
