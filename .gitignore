@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+data/recruit.db
+data/profiles_cache.json
+eval_report.json
+.venv/

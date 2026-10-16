@@ -1,0 +1,17 @@
+# ===== 核心编排 =====
+langgraph>=1.0
+langchain-core>=1.0
+
+# ===== 向量库 =====
+elasticsearch>=8.13
+pymilvus>=2.4
+
+# ===== 模型（可选，未安装时自动回退 hash embedding / 规则 rerank）=====
+sentence-transformers>=3.0
+openai>=1.40
+
+# ===== 服务与配置 =====
+fastapi>=0.110
+uvicorn>=0.29
+pydantic-settings>=2.3
+python-dotenv>=1.0
