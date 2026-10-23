@@ -215,7 +215,8 @@ class ListInterviewsTool(BaseTool):
     name = "list_interviews"
     description = "查询某天/某面试官/某候选人的面试安排"
     required = []
-    optional = {"date": "YYYY-MM-DD", "interviewer": "面试官", "status": "scheduled/done/cancelled"}
+    optional = {"date": "YYYY-MM-DD", "date_from": "起始日期（含）", "date_to": "结束日期（含）",
+                "interviewer": "面试官", "status": "scheduled/done/cancelled"}
 
     def run(self, **kw: Any) -> ToolResult:
         conds, params, obs = [], [], []
@@ -224,6 +225,15 @@ class ListInterviewsTool(BaseTool):
                 conds.append(f"{col}=?")
                 params.append(kw[f])
                 obs.append(f"{col}={kw[f]}")
+        # 区间查询：「下周有几场面试」需要 date_from/date_to
+        if kw.get("date_from"):
+            conds.append("interview_date >= ?")
+            params.append(kw["date_from"])
+            obs.append(f"从 {kw['date_from']}")
+        if kw.get("date_to"):
+            conds.append("interview_date <= ?")
+            params.append(kw["date_to"])
+            obs.append(f"到 {kw['date_to']}")
         where = (" WHERE " + " AND ".join(conds)) if conds else ""
         with sqlite3.connect(DB_PATH) as con:
             con.row_factory = sqlite3.Row
@@ -244,13 +254,26 @@ class SalaryCalcTool(BaseTool):
 
     name = "calc_offer"
     description = "计算 offer 总包、薪资覆盖率、与候选人期望的差距"
-    required = ["expected"]
+    required = []
     optional = {"expected": "目标/期望年薪(元)", "base": "月薪(元)", "months": "发薪月数，默认13",
                 "bonus": "绩效年薪(元)", "signing": "签字费(元)", "level": "职级，如 P6",
-                "candidate_expected": "候选人档案中的实际期望年薪(元)"}
+                "candidate_expected": "候选人档案中的实际期望年薪(元)",
+                "candidate_expected_monthly": "候选人档案中的实际期望月薪(元)"}
 
     def run(self, **kw: Any) -> ToolResult:
-        target = float(kw["expected"])
+        cand_exp = kw.get("candidate_expected")
+        cand_exp_m = kw.get("candidate_expected_monthly")
+        target = float(kw.get("expected") or 0)
+        # 用户没说目标总包时，以候选人档案期望（年薪口径）为目标：
+        # 「给张伟测算 offer」的合理输出是「满足张伟期望需要多少钱」，
+        # 而不是拿一个不存在的数字算覆盖率。
+        if target <= 0 and cand_exp:
+            target = float(cand_exp)
+        if target <= 0:
+            return ToolResult(name=self.name, ok=False,
+                              error="缺少 offer 目标：请说明期望总包（如「总包 60 万」）"
+                                    "或指定候选人（我按档案中的期望薪资测算）",
+                              observations=["目标年薪缺失"])
         months = int(kw.get("months") or 13)
         base_m = float(kw.get("base") or 0)
         bonus = float(kw.get("bonus") or 0)
@@ -266,17 +289,20 @@ class SalaryCalcTool(BaseTool):
 
         notes: list[str] = []
         real_gap = None
-        cand_exp = kw.get("candidate_expected")
         if cand_exp:
             cand_exp = float(cand_exp)
             real_gap = total - cand_exp
             if real_gap < 0:
                 notes.append(
-                    f"⚠️ 方案低于候选人档案中的实际期望 {cand_exp/10000:.0f}万 "
-                    f"{abs(real_gap)/10000:.0f}万，谈判风险高，建议提薪或用签字费补足")
+                    f"⚠️ 方案低于候选人档案中的实际期望 {cand_exp/10000:.1f}万，"
+                    f"缺口 {abs(real_gap)/10000:.1f}万，谈判风险高，建议提薪或用签字费补足")
             else:
                 notes.append(
-                    f"✅ 方案高于候选人实际期望 {cand_exp/10000:.0f}万 {real_gap/10000:.0f}万")
+                    f"✅ 方案高于候选人实际期望 {cand_exp/10000:.1f}万，"
+                    f"余量 {real_gap/10000:.1f}万")
+        elif cand_exp_m:
+            notes.append(f"候选人档案期望月薪 {float(cand_exp_m)/10000:.1f}万"
+                         f"（折合年薪约 {float(cand_exp_m)*12/10000:.1f}万）")
 
         if bonus == 0 and signing == 0 and coverage < 0.95:
             fix = round(target - total)

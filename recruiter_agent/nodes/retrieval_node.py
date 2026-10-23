@@ -177,7 +177,37 @@ def score_node(state: RecruitState) -> dict:
             break
 
     results.sort(key=lambda x: x["total"], reverse=True)
-    results = results[:top_n]
+
+    # 评估指定候选人：被评估的人必须在结果里。
+    # 早前「评估郑凯和 AI平台工程师 的匹配度」返回的是范晓东/李娜/郑凯（郑凯排第 3），
+    # 「评估张伟和后端岗位」更是完全没有张伟——用户问的是「这个人行不行」，
+    # 答案却在评别人，这在面试里是硬伤。
+    if intent == "candidate_evaluate" and entities.get("candidate_id"):
+        target_id = str(entities["candidate_id"])
+        hit = next((r for r in results if r["candidate_id"] == target_id), None)
+        if hit is None:
+            prof = profiles.get(target_id)
+            chunk = Chunk(id=target_id, text=(prof or {}).get("resume_text", ""),
+                          metadata={k: v for k, v in (prof or {}).items()})
+            cand = _to_candidate(target_id, prof, chunk)
+            sb = score_candidate(cand, job, chunk, s)
+            hit = {
+                "candidate_id": target_id, "name": cand.name, "title": cand.title,
+                "total": sb.total, "dimensions": sb.dimensions, "reasons": sb.reasons,
+                "risks": sb.risks, "evidence": sb.evidence, "vetoed": sb.vetoed,
+                "passed": (not sb.vetoed) and sb.total >= s.pass_score,
+                "_pinned": True,
+            }
+            results.append(hit)
+        else:
+            hit["_pinned"] = True
+        # 被评估的人固定排第一：用户问的是「这个人行不行」，不是「谁更合适」。
+        # 其余候选人是参照系，按分数降序排在后面。
+        results.sort(key=lambda x: (0, x.get("rank", 0)) if x.get("_pinned") else (1, -x["total"]))
+        results = results[:max(top_n, 1)]
+    else:
+        results = results[:top_n]
+
     for i, r in enumerate(results, 1):
         r["rank"] = i
 
@@ -196,18 +226,31 @@ def score_node(state: RecruitState) -> dict:
 
 # ---------------------------------------------------------------- job_recommend
 def _score_jobs_for_candidate(entities: dict, s) -> dict:
-    """给定候选人，对在招岗位逐个打分并排序（候选人↔岗位匹配度）。"""
+    """给定候选人，对在招岗位逐个打分并排序（候选人↔岗位匹配度）。
+
+    两种入口：
+      1. HR 视角：指定了候选人（姓名/ID），从库里读档案；
+      2. 求职者视角：「我 6 年经验在北京，找什么岗位合适」——没有候选人档案，
+         用用户自述的 技能/年限/城市/期望薪资 构造一个虚拟候选人再匹配岗位。
+         早前这种情况直接报「未识别候选人」，求职者根本用不了这个系统。
+    """
     cid = entities.get("candidate_id")
     jobs = entities.get("_jobs") or []
-    if not cid:
-        return {"scores": [], "score_meta": {"count": 0, "note": "未识别候选人，无法推荐岗位",
-                                             "mode": "job_recommend"}}
     if not jobs:
         return {"scores": [], "score_meta": {"count": 0, "note": "当前无在招岗位",
                                              "mode": "job_recommend"}}
 
-    prof = _load_profiles().get(cid)
-    cand = _to_candidate(cid, prof, Chunk(id=cid, text=prof.get("resume_text", "") if prof else ""))
+    if cid:
+        prof = _load_profiles().get(cid)
+        cand = _to_candidate(cid, prof, Chunk(id=cid, text=prof.get("resume_text", "") if prof else ""))
+        who = cand.name
+    else:
+        cand = _candidate_from_self(entities)
+        if cand is None:
+            return {"scores": [], "score_meta": {
+                "count": 0, "mode": "job_recommend", "candidate": "你",
+                "note": "请补充你的技能方向、工作年限和城市（例如：6 年 Java，北京）"}}
+        who = "你（按自述条件匹配）"
 
     results: list[dict[str, Any]] = []
     for j in jobs:
@@ -305,6 +348,33 @@ def _resolve_job(entities: dict, state: RecruitState) -> JobRequisition:
 
 
 _profiles_cache: dict | None = None
+
+
+def _candidate_from_self(entities: dict) -> Candidate | None:
+    """求职者自述 → 虚拟候选人。
+
+    只要求「技能方向」或「年限」至少有一项，否则连岗位方向都判断不了，
+    交给调用方反问用户。城市/期望薪资是加分项，缺失不影响匹配。
+    """
+    skills = [s for s in (entities.get("skills") or []) if s]
+    years = entities.get("min_years")
+    if not skills and years is None:
+        return None
+    city = (entities.get("cities") or [""])[0]
+    min_y = float(years or 0)
+    return Candidate(
+        candidate_id="SELF",
+        name="你",
+        title="、".join(skills[:3]) if skills else "自述候选人",
+        years=min_y,
+        city=city,
+        education=str(entities.get("education") or ""),
+        skills=skills,
+        job_intent=str(entities.get("job_intent") or "active"),
+        expected_salary=int(entities.get("expected_salary") or 0),
+        availability_days=15,
+        resume_text=" ".join(skills),
+    )
 
 
 def _load_profiles() -> dict:

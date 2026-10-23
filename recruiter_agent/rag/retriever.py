@@ -82,15 +82,20 @@ def build_filters(entities: dict[str, Any], query: str, intent: str) -> dict[str
     filters: dict[str, Any] = {}
     negated: list[str] = entities.get("negated", [])
 
+    # 评估「某人 vs 某岗位」时，城市和年限描述的是**岗位**，不是候选人准入条件。
+    # 早前把它们当成召回 filter，导致「评估张伟和后端岗位的匹配度」把北京的
+    # 张伟直接过滤掉，答案里只剩下上海的其他候选人——评的变成了别人。
+    named_eval = intent == "candidate_evaluate" and bool(entities.get("candidate_name"))
+
     cities = entities.get("cities", [])
-    if cities and not any(c in negated for c in ("城市", "city")):
+    if cities and not named_eval and not any(c in negated for c in ("城市", "city")):
         # 统一用 city 字段（存为单值），传 list 时各后端按「任一命中」处理
         filters["city"] = cities if len(cities) > 1 else cities[0]
 
     if intent in ("candidate_search", "candidate_evaluate"):
-        if "min_years" in entities and "经验" not in negated and "年限" not in negated:
+        if "min_years" in entities and not named_eval and "经验" not in negated and "年限" not in negated:
             filters["min_years"] = float(entities["min_years"])
-        if "max_years" in entities and "经验" not in negated:
+        if "max_years" in entities and not named_eval and "经验" not in negated:
             filters["max_years"] = float(entities["max_years"])
         if "max_salary" in entities and "薪资" not in negated and "薪酬" not in negated:
             filters["max_salary"] = float(entities["max_salary"])
@@ -134,6 +139,11 @@ def profile_search(chunks: list[Chunk], entities: dict[str, Any],
             continue
         yrs = float(md.get("years", 0) or 0)
         if min_y is not None and "经验" not in negated and yrs < float(min_y):
+            continue
+        # max_years 也必须在这里硬过滤：早前只给了一个「超配扣分」的评分项，
+        # 导致「不考虑 5 年以上的」仍然把 6 年、8 年的候选人召回来，
+        # 然后靠 rerank 的小幅扣分并不能把他们排后面（用户看到的就是完全相反的推荐）。
+        if max_y is not None and "经验" not in negated and yrs > float(max_y):
             continue
         sal = float(md.get("expected_salary", 0) or 0)
         if (filters or {}).get("max_salary") and sal > float(filters["max_salary"]):

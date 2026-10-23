@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -119,7 +120,27 @@ def test_entity_extraction():
 
     e2 = extract_entities("评估张伟和 AI平台工程师 的匹配度")
     assert e2["candidate_name"] == "张伟"
-    assert e2["job_title"] == "AI平台"
+    # 职级后缀属于岗位名本身，不能被当噪声剥掉（早前会截成「AI平台」，
+    # 再拿去模糊匹配就会命中错误的 JD）
+    assert e2["job_title"] == "AI平台工程师"
+
+    # 年限方向：上限表述不能被解析成下限，也不能凭空补 +2 的软上限
+    e4 = extract_entities("3年以下的前端")
+    assert e4.get("max_years") == 3.0 and "min_years" not in e4, e4
+    assert extract_entities("不超过5年的算法").get("max_years") == 5.0
+    assert "min_years" not in extract_entities("不超过5年的算法")
+    assert extract_entities("5年以上")["min_years"] == 5.0
+    assert "max_years" not in extract_entities("5年以上"), "「以上」不应凭空生成上限"
+
+    # 薪资：k 按月薪折算成年薪；「以内」是上限，不能被当成人名下界
+    s1 = extract_entities("找 3 个上海 5 年以上 Java 后端候选人，薪资 60k 以内")
+    assert s1["max_salary"] == 720000 and "min_salary" not in s1, s1
+    s2 = extract_entities("找北京 LLM 候选人，年薪 80 万以内")
+    assert s2["max_salary"] == 800000
+    assert s2.get("candidate_name") is None, "「万以内」不能被当成人名"
+
+    # 中文数字人数
+    assert extract_entities("找三个北京 LLM 候选人")["top_n"] == 3
 
     e3 = extract_entities("给候选人张伟测算 offer，期望总包 60 万")
     assert e3["salary_kw"] == [600000], "总包 60 万应解析为年薪 60 万"
@@ -207,6 +228,57 @@ def test_graph_end_to_end():
         if s["name"] in r["answer"]:
             assert f"{s['total']:g}" in r["answer"] or str(s["total"]) in r["answer"]
     print("✓ test_graph_end_to_end")
+
+
+def test_evaluate_pins_named_candidate():
+    """评估指定候选人时，被评估的人必须在结果里且排第一。"""
+    from recruiter_agent import RecruitAgent
+    from recruiter_agent.vectorstore import get_store
+    from scripts.init_data import build_db
+    from scripts.index_data import index
+
+    if not (ROOT / "data" / "recruit.db").exists():
+        build_db()
+    if get_store().count("candidates") == 0:
+        index("memory")
+
+    agent = RecruitAgent()
+    # 郑凯在北京，岗位 JD-1001 也在北京
+    r = agent.run("评估郑凯和 AI平台工程师 的匹配度", session_id="t-eval-1")
+    names = [s["name"] for s in (r["shortlist"] or [])]
+    assert "郑凯" in names, f"被评估人不在结果里: {names}"
+    assert names[0] == "郑凯", f"被评估人应排第一: {names}"
+
+    # 张伟在北京，岗位 JD-1002 在上海——岗位城市不能把本人筛掉
+    r2 = agent.run("评估张伟和后端岗位的匹配度", session_id="t-eval-2")
+    names2 = [s["name"] for s in (r2["shortlist"] or [])]
+    assert "张伟" in names2, f"岗位城市不应过滤掉被评估人: {names2}"
+    assert names2[0] == "张伟"
+    print("✓ test_evaluate_pins_named_candidate")
+
+
+def test_offer_uses_candidate_archive():
+    """「给张伟测算 offer」：档案期望 65K/月 → 年薪 78 万，不能算出 0 万。"""
+    from recruiter_agent import RecruitAgent
+    from recruiter_agent.vectorstore import get_store
+    from scripts.init_data import build_db
+    from scripts.index_data import index
+
+    if not (ROOT / "data" / "recruit.db").exists():
+        build_db()
+    if get_store().count("candidates") == 0:
+        index("memory")
+
+    agent = RecruitAgent()
+    r = agent.run("给张伟测算 offer", session_id="t-offer-1")
+    assert r["intent"] == "offer_negotiation"
+    assert "总包" in r["answer"]
+    # 只校验「总包」这一行的金额：整篇里出现「余量 0.0万」是正常文案
+    m = re.search(r"\*\*总包\*\*\s*\|\s*\*\*([\d.]+)万", r["answer"])
+    assert m, f"未找到总包行:\n{r['answer'][:400]}"
+    assert float(m.group(1)) >= 70, f"总包应为档案期望 78 万，实际 {m.group(1)} 万"
+    assert "78" in r["answer"], "应按档案期望（65K×12=78 万）测算"
+    print("✓ test_offer_uses_candidate_archive")
 
 
 def test_graph_all_intents():

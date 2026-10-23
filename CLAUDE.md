@@ -28,7 +28,7 @@ cd /Users/andy_mac/Documents/CodeSpace/BackEnd/ai-recruiter
 ./venv/bin/python scripts/index_data.py    # 向量入库（自动选后端）
 ./venv/bin/python run_demo.py --demo       # 7 个场景全链路
 ./venv/bin/python run_demo.py -q "问题" --trace   # 单次问答 + Trace
-./venv/bin/python tests/test_all.py        # 15 项测试
+./venv/bin/python tests/test_all.py        # 17 项测试
 ./venv/bin/python scripts/run_eval.py      # 10 条评测集
 ./venv/bin/python -m uvicorn api:app --port 8000
 ```
@@ -131,7 +131,7 @@ START → intent ─┬(置信度<0.45)→ clarify → END
 | 换向量库 | 实现 `VectorStore` 协议 | 复用 `rrf_fuse`；filter 字段名映射要写对 |
 | 加多轮对话 | LangGraph `checkpointer`（`SqliteSaver`） | 当前 `RecruitAgent` 是无状态的 |
 
-**验证标准**：任何改动后 `./venv/bin/python tests/test_all.py` 必须 15/15，且 `scripts/run_eval.py` 的意图准确率不能下降。
+**验证标准**：任何改动后 `./venv/bin/python tests/test_all.py` 必须 17/17，且 `scripts/run_eval.py` 的意图准确率不能下降。
 
 ---
 
@@ -139,7 +139,7 @@ START → intent ─┬(置信度<0.45)→ clarify → END
 
 ```
 意图准确率        : 100.0%   (10 条评测集)
-实体抽取 P/R/F1   : 0.89 / 0.89 / 0.89
+实体抽取 P/R/F1   : 1.00 / 1.00 / 1.00
 检索 nDCG@5       : 0.801
 硬约束违反率      : 0.0%
 事实一致性        : 100.0%   (校验 20 处数值，0 处不符)
@@ -161,7 +161,7 @@ START → intent ─┬(置信度<0.45)→ clarify → END
 
 ## 提交前自检
 
-- [ ] `./venv/bin/python tests/test_all.py` → 15/15
+- [ ] `./venv/bin/python tests/test_all.py` → 17/17
 - [ ] `./venv/bin/python scripts/run_eval.py` → 意图准确率未下降
 - [ ] 若改了 `state.py`：确认新增字段**已声明**
 - [ ] 若改了 filter 映射：确认映射到的字段**在 ES mapping / Milvus schema 中真实存在**

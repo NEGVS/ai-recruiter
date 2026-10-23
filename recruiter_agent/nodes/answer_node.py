@@ -167,6 +167,12 @@ def render_final(state: RecruitState, facts: str) -> str:
         return _render_offer(state)
     if intent == "policy_qa":
         return _render_policy(state)
+    if intent == "candidate_detail":
+        return _render_candidate_detail(state)
+    if intent == "job_detail":
+        return _render_job_detail(state)
+    if intent == "interview_list":
+        return _render_interview_list(state)
     if intent == "chitchat":
         return "你好，我是 AI 招聘助手。我可以帮你做：\n- 人才检索（按技能/城市/年限找人）\n- 候选人匹配度评估\n- 面试排期\n- 薪酬与 offer 测算\n- 人才市场行情分析\n- 招聘制度问答\n\n直接说需求即可，例如「找 5 个北京 3 年以上 LLM 方向的候选人」。"
     if intent == "job_recommend":
@@ -191,7 +197,9 @@ def _render_ranking(state, scores, meta, s, top_n) -> str:
     if ent.get("cities"):
         cond.append(f"城市 {'、'.join(ent['cities'])}")
     if ent.get("min_years") is not None:
-        cond.append(f"{ent['min_years']}+ 年经验")
+        cond.append(f"{ent['min_years']:g}+ 年经验")
+    if ent.get("max_years") is not None:
+        cond.append(f"≤ {ent['max_years']:g} 年经验")
     if ent.get("max_salary"):
         cond.append(f"薪资 ≤ {ent['max_salary']//1000}K")
     head = "候选人匹配度分析" if intent == "candidate_evaluate" else "候选人推荐"
@@ -421,11 +429,8 @@ def _render_offer(state: RecruitState) -> str:
     L.append(f"- **覆盖率**：{(p.get('coverage') or 0)*100:.0f}%（{p.get('verdict')}）")
     for n in p.get("notes", []):
         L.append(f"- {n}")
-    ce = p.get("candidate_expected")
-    if ce:
-        L.append(f"- **候选人实际期望**：{_wan(ce)} → 本方案 "
-                 f"{'低于' if (p.get('gap_to_candidate') or 0) < 0 else '高于'} "
-                 f"{_wan(abs(p.get('gap_to_candidate') or 0))}")
+    # 候选人实际期望与差额已由 notes 表达（含「持平」分支），不再重复渲染，
+    # 否则同一信息出现两次、余量为 0 时还会多出一行「高于 0元」。
 
     # 候选人信息
     for t in state.get("tool_results") or []:
@@ -445,6 +450,105 @@ def _wan(v: Any) -> str:
     if n >= 10000:
         return f"{n/10000:.1f}万"
     return f"{n:.0f}元"
+
+
+def _render_candidate_detail(state: RecruitState) -> str:
+    """候选人档案/简历详情。"""
+    p = None
+    for t in reversed(state.get("tool_results") or []):
+        if t.get("tool") == "get_candidate":
+            if t.get("ok"):
+                p = t.get("_payload") or {}
+            else:
+                return f"## 候选人档案\n\n{t.get('error') or '未找到该候选人'}。"
+            break
+    c = (p or {}).get("candidate") or {}
+    if not c:
+        name = (state.get("entities") or {}).get("candidate_name")
+        return ("## 候选人档案\n\n"
+                + (f"库里没有找到「{name}」，请确认姓名。" if name
+                   else "请告诉我要查看哪位候选人的简历（例如「张伟的简历」）。"))
+
+    L = [f"## {c['name']} — {c.get('title', '')}", ""]
+    L.append(f"- **基本信息**：{c.get('years', '-')} 年经验 ｜ {c.get('city', '-')} ｜ "
+             f"{c.get('education', '-')}（{c.get('school', '-')} {c.get('major', '')}）")
+    L.append(f"- **当前薪资/期望**：{_k(c.get('current_salary'))} → **{_k(c.get('expected_salary'))}**")
+    L.append(f"- **求职意向**：{c.get('job_intent', '-')} ｜ **可到岗**：{c.get('availability_days', '-')} 天")
+    iv = c.get("interview") or {}
+    if iv:
+        L.append(f"- **最近面试**：{iv.get('score', '-')} 分（{iv.get('rounds', '-')} 轮，"
+                 f"{iv.get('last', '-')}，面试官 {iv.get('reviewer', '-')}）")
+
+    if c.get("skills"):
+        L.append(f"\n**核心技能**：{'、'.join(c['skills'])}")
+    if c.get("highlights"):
+        L.append("\n**亮点**")
+        for h in c["highlights"][:4]:
+            L.append(f"- {h}")
+    if c.get("risks"):
+        L.append("\n**风险点**")
+        for r in c["risks"][:4]:
+            L.append(f"- {r}")
+    if c.get("projects"):
+        L.append("\n**项目经历**")
+        for pr in c["projects"][:3]:
+            L.append(f"- {pr.get('name', '')}（{pr.get('role', '')}）：{str(pr.get('detail', ''))[:90]}")
+    if c.get("resume_text"):
+        L.append(f"\n**简历摘要**：{c['resume_text'][:260]}")
+    return "\n".join(L)
+
+
+def _render_job_detail(state: RecruitState) -> str:
+    """岗位详情 / 招聘进度。"""
+    p = None
+    for t in reversed(state.get("tool_results") or []):
+        if t.get("tool") == "get_job":
+            if t.get("ok"):
+                p = t.get("_payload") or {}
+            else:
+                return f"## 岗位详情\n\n{t.get('error') or '未找到该岗位'}。"
+            break
+    j = (p or {}).get("job") or {}
+    if not j:
+        return "## 岗位详情\n\n请告诉我要查哪个岗位（例如「AI平台工程师」或「JD-1001」）。"
+
+    L = [f"## {j['title']}（{j.get('job_id', '')}）", ""]
+    L.append(f"- **城市/层级**：{j.get('city', '-')} ｜ {j.get('level', '-')}")
+    L.append(f"- **年限要求**：{j.get('min_years', '-')}-{j.get('max_years', '-')} 年")
+    L.append(f"- **薪资带宽**：{_k(j.get('salary_min'))}-{_k(j.get('salary_max'))}（月薪）")
+    L.append(f"- **学历要求**：{j.get('education_req', '不限')} ｜ "
+             f"**紧急度**：{j.get('urgency', '-')} ｜ **剩余 HC**：{j.get('headcount', '-')}")
+    if j.get("hard_skills"):
+        L.append(f"- **硬技能**：{'、'.join(j['hard_skills'])}")
+    if j.get("nice_skills"):
+        L.append(f"- **加分项**：{'、'.join(j['nice_skills'])}")
+    if j.get("description"):
+        L.append(f"\n**岗位描述**：{j['description']}")
+    return "\n".join(L)
+
+
+def _render_interview_list(state: RecruitState) -> str:
+    """面试日程列表。"""
+    p = None
+    for t in reversed(state.get("tool_results") or []):
+        if t.get("tool") == "list_interviews" and t.get("ok"):
+            p = t.get("_payload") or {}
+            break
+    rows = (p or {}).get("interviews") or []
+    if not rows:
+        return "## 面试日程\n\n当前没有查询到面试安排。可以说「帮张伟约个面试」来安排。"
+
+    status_cn = {"scheduled": "待面试", "done": "已完成", "cancelled": "已取消"}
+    L = [f"## 面试日程（共 {len(rows)} 场）", ""]
+    L.append("| 日期 | 时间 | 候选人 | 轮次 | 面试官 | 状态 |")
+    L.append("|---|---|---|---|---|---|")
+    for r in rows[:20]:
+        L.append(f"| {r.get('interview_date', '-')} | {r.get('start_hour', '-')}:00 | "
+                 f"**{r.get('candidate_name', '-')}** | {r.get('round', '-')} | "
+                 f"{r.get('interviewer', '-')} | {status_cn.get(r.get('status'), r.get('status', '-'))} |")
+    pending = [r for r in rows if r.get("status") == "scheduled"]
+    L.append(f"\n- 待面试 **{len(pending)}** 场，已完成 {len(rows) - len(pending)} 场。")
+    return "\n".join(L)
 
 
 def _render_policy(state: RecruitState) -> str:

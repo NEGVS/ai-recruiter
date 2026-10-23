@@ -171,8 +171,9 @@ def _relaxation_can_help(state: RecruitState) -> bool:
 
 
 def route_after_answer(state: RecruitState) -> Literal["reflect", "end"]:
-    """闲聊与「向用户追问」无需自我反思；面试确认也直接结束。"""
-    if state.get("intent") in ("chitchat", "confirm_interview"):
+    """闲聊、纯查询类（简历详情/岗位详情/面试日程）与「向用户追问」无需自我反思。"""
+    if state.get("intent") in ("chitchat", "confirm_interview",
+                               "candidate_detail", "job_detail", "interview_list"):
         return "end"
     if state.get("pending_input") or state.get("pending_interview"):
         return "end"

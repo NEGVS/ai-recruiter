@@ -34,6 +34,9 @@ CLARIFY_QUESTIONS = {
     "policy_qa": "请说明你想了解的具体政策问题（如面试改期、offer 审批、背景调查），我来查证公司制度。",
     "chitchat": "",
     "confirm_interview": "",  # 用户在确认时段，不需要追问
+    "candidate_detail": "请告诉我要查看哪位候选人的简历或进展（例如「张伟的简历」）。",
+    "job_detail": "请告诉我要查看哪个岗位（例如「AI平台工程师」或「JD-1001」）。",
+    "interview_list": "请说明要查哪段时间的面试（例如「下周的面试」）。",
 }
 
 
@@ -143,8 +146,11 @@ def _normalize_entities(entities: dict, query: str, intent: str) -> dict:
     # 经验字段合理性
     if "min_years" in entities and entities["min_years"] > 25:
         entities.pop("min_years")
-    if "max_years" in entities and "min_years" not in entities:
-        entities["min_years"] = max(0.0, entities["max_years"] - 3)
+    # 只给上界时**不要**凭空补下界。早前写的是 max-3，导致
+    # 「不考虑 5 年以上的」被补成「2~5 年」，把 2 年以下的人排除掉了；
+    # 下界缺失就交给岗位 JD 或检索层的默认值处理。
+    if "max_years" in entities and entities["max_years"] > 25:
+        entities.pop("max_years")
 
     return entities
 
