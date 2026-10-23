@@ -57,6 +57,9 @@ PLANS: dict[str, list[dict[str, Any]]] = {
     "chitchat": [
         {"step": "none", "reason": "闲聊直接回答"},
     ],
+    "confirm_interview": [
+        {"step": "schedule_interview", "reason": "写入确认时段"},
+    ],
 }
 
 
@@ -125,6 +128,10 @@ def _bind_args(step: str, intent: str, e: dict) -> dict[str, Any]:
         args["candidate"] = e.get("candidate_name") or e.get("candidate_id") or ""
         if e.get("date"):
             args["date"] = e["date"]
+        # confirm_interview 意图：直接带 confirm=yes 和时段序号
+        if e.get("_confirm_slot") is not None:
+            args["confirm"] = "yes"
+            args["_slot_index"] = int(e["_confirm_slot"])
     elif step == "calc_offer":
         # expected 直接用用户说的年值（不要取 max_salary 上限，否则会放大）
         args["expected"] = e.get("expected_salary") or e.get("max_salary") or 0

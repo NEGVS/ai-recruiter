@@ -190,7 +190,9 @@ class ScheduleInterviewTool(BaseTool):
                 observations=[f"为 {cand['name']} 找到 {len(slots)} 个无冲突时段，待确认"],
             )
 
-        slot = slots[0]
+        # 确认时段：优先用用户指定的序号（0-indexed）；否则默认第 0 个
+        slot_idx = int(kw.get("_slot_index", 0))
+        slot = slots[min(slot_idx, len(slots) - 1)]
         with sqlite3.connect(DB_PATH) as con:
             con.execute(
                 "INSERT INTO interviews (candidate_id, candidate_name, interviewer, round, "

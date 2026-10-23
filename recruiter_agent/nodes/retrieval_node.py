@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ..constraints import relax_soft_constraints
 from ..rag import get_retriever
 from ..scoring import score_candidate
 from ..state import Candidate, Chunk, JobRequisition, RecruitState
@@ -37,25 +38,16 @@ def retrieve_node(state: RecruitState) -> dict:
         jd_text = f"{job['title']} {' '.join(job.get('hard_skills', []))} {' '.join(job.get('nice_skills', []))}"
         query = f"{query} {jd_text}".strip()
 
-    # Reflection 提出「放宽硬约束」→ 放宽一次（下调门槛，而非清零约束）
+    # Reflection 提出「放宽」时，只允许放宽**软约束（年限）**。
+    # 城市/薪资/学历/意向是用户的商业约束，系统无权为凑数而放开——
+    # 早前版本会把 max_salary 一起放大 15%，导致「60k 以内」变成 79k，
+    # 违反硬约束且答案里还把它当成"筛选条件"展示。
     ref = state.get("reflection") or {}
     relax_hint = " ".join(ref.get("next_actions") or []) + " ".join(ref.get("issues") or [])
     if "放宽" in relax_hint:
-        before = {k: entities.get(k) for k in ("min_years", "max_years", "max_salary")}
-        relaxed = dict(entities)
-        if relaxed.get("min_years") is not None:
-            relaxed["min_years"] = max(0.0, float(relaxed["min_years"]) - 2.0)
-        if relaxed.get("max_years") is not None and float(relaxed["max_years"]) < 12:
-            relaxed["max_years"] = float(relaxed["max_years"]) + 3.0
-        if relaxed.get("max_salary"):
-            relaxed["max_salary"] = float(relaxed["max_salary"]) * 1.15
-        after = {k: relaxed.get(k) for k in ("min_years", "max_years", "max_salary")}
-        if after != before:
-            hist = list(relaxed.get("_relaxed") or [])
-            hist.append({"round": ref.get("round"), "before": before, "after": after})
-            relaxed["_relaxed"] = hist
-            entities = relaxed
-            log.info("Reflection 第%s轮放宽约束：%s → %s", ref.get("round"), before, after)
+        entities, changed = relax_soft_constraints(entities)
+        if changed:
+            log.info("Reflection 第%s轮放宽软约束：%s", ref.get("round"), changed)
 
     res = r.retrieve(query, entities, intent, COLLECTION_CANDIDATES, do_rerank=False)
     return {
@@ -153,8 +145,10 @@ def score_node(state: RecruitState) -> dict:
     # 构造 JD：显式 JD 优先；否则用检索条件构造虚拟 JD（保证评分有依据）
     job = _resolve_job(entities, state)
 
+    # 用户明确说了「找 N 个」就按 N 返回；没说才用默认 5。
+    # 早前用 max(...,5) 会让「找 2 个」返回 3 个——擅自扩容与擅自放宽同属越权。
     profiles = _load_profiles()
-    top_n = max(entities.get("top_n", 5), 5)
+    top_n = _requested_top_n(entities, default=5)
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     for c in chunks:
@@ -179,7 +173,7 @@ def score_node(state: RecruitState) -> dict:
             "passed": (not sb.vetoed) and sb.total >= s.pass_score,
         }
         results.append(d)
-        if len(results) >= top_n * 2:
+        if len(results) >= max(top_n * 2, top_n):
             break
 
     results.sort(key=lambda x: x["total"], reverse=True)
@@ -233,7 +227,7 @@ def _score_jobs_for_candidate(entities: dict, s) -> dict:
         })
 
     results.sort(key=lambda x: x["total"], reverse=True)
-    top_n = max(entities.get("top_n", 3), 3)
+    top_n = _requested_top_n(entities, default=3)
     results = results[:top_n]
     for i, r in enumerate(results, 1):
         r["rank"] = i
@@ -265,6 +259,21 @@ def _job_from_row(j: dict) -> JobRequisition:
 
 
 # ---------------------------------------------------------------- 辅助
+def _requested_top_n(entities: dict, default: int) -> int:
+    """取用户显式要求的人数；未指定时才用默认值。
+
+    注意不能写成 `max(top_n, 5)`：用户说「找 2 个」就该给 2 个，
+    系统擅自扩容会让答案与用户预期不符（也容易被面试官抓住）。
+    """
+    raw = entities.get("top_n")
+    if raw in (None, "", 0):
+        return default
+    try:
+        return max(1, min(30, int(raw)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _resolve_job(entities: dict, state: RecruitState) -> JobRequisition:
     j = entities.get("_job")
     if j:

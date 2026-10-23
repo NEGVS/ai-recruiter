@@ -19,6 +19,7 @@ import re
 from typing import Any
 
 from ..config import get_settings
+from ..constraints import verify_hard_constraints
 from ..llm import get_llm
 from ..state import RecruitState
 from .common import timed
@@ -175,7 +176,19 @@ def _rule_based_checks(state: RecruitState, draft: str) -> dict[str, Any]:
             issues.append(f"声称输出前 {m.group(1)} 名，但实际仅 {len(scores)} 人")
 
     # --- C3 约束遵守 ---
-    cities = entities.get("cities") or [] if rank_intent else []
+    # 用「用户原始约束」而非「可能已被放宽的当前约束」做校验。
+    # entities 中的 _original 是 retrieve_node 放宽时写入的原始快照；
+    # 如果从未放宽，_original 不存在，直接用 entities 本身。
+    original = entities.get("_original") or entities
+
+    # 硬约束被改动（不该放宽的城市/薪资等）→ 报告
+    hard_viols = verify_hard_constraints(entities, entities.get("_original"))
+    if hard_viols:
+        for v in hard_viols:
+            issues.append(v)
+        hard_fail = True
+
+    cities = original.get("cities") or [] if rank_intent else []
     if cities and scores:
         viol = [s_["name"] for s_ in scores
                 if _city_of(state, s_.get("candidate_id")) and _city_of(state, s_.get("candidate_id")) not in cities]
@@ -184,12 +197,12 @@ def _rule_based_checks(state: RecruitState, draft: str) -> dict[str, Any]:
             hard_fail = True
         detail["C3_constraints"] = {"cities": cities, "violations": viol}
 
-    max_years = entities.get("max_years") if rank_intent else None
+    max_years = original.get("max_years") if rank_intent else None
     if max_years and scores:
         over = [s_["name"] for s_ in scores
                 if _years_of(state, s_.get("candidate_id")) and _years_of(state, s_.get("candidate_id")) > float(max_years) + 1.5]
         if over:
-            issues.append(f"以下候选人经验明显超出上限 {max_years} 年：{', '.join(over[:3])}")
+            issues.append(f"以下候选人经验明显超出原始上限 {max_years} 年：{', '.join(over[:3])}")
 
     # --- C4 完整性：多子问题检测 ---
     q = state["user_query"]

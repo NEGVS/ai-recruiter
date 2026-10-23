@@ -14,6 +14,7 @@ import json
 import logging
 
 from ..intent_rules import INTENT_PROMPT, INTENTS, candidate_intents, extract_entities, rule_based_intent
+from ..constraints import snapshot_original
 from ..llm import get_llm
 from ..state import RecruitState
 from .common import timed
@@ -32,6 +33,7 @@ CLARIFY_QUESTIONS = {
     "market_insight": "请说明要分析哪个方向（如 LLM、后端）的市场行情，我给出供需与薪资分位分析。",
     "policy_qa": "请说明你想了解的具体政策问题（如面试改期、offer 审批、背景调查），我来查证公司制度。",
     "chitchat": "",
+    "confirm_interview": "",  # 用户在确认时段，不需要追问
 }
 
 
@@ -44,6 +46,17 @@ def intent_node(state: RecruitState) -> dict:
     rule_intent = rule["intent"]
     rule_conf = float(rule["confidence"])
     entities = dict(rule["entities"])
+
+    # 跨轮会话：把上一轮缓存的实体（如候选人姓名）带进来。
+    # 当前 query 没提到的字段（值为空/None）不覆盖缓存值——
+    # 否则「确认第2个时段」会把上一轮的 candidate_name=张伟 清成 None。
+    prior = state.get("entities") or {}
+    for k, v in prior.items():
+        if k.startswith("_") or k in ("negated",):
+            continue
+        cur = entities.get(k)
+        if cur in (None, "", [], {}) and v not in (None, "", [], {}):
+            entities[k] = v
 
     llm = get_llm()
     intent, conf, reason = rule_intent, rule_conf, f"规则:{rule['reason']}"
@@ -82,6 +95,11 @@ def intent_node(state: RecruitState) -> dict:
 
     # --- 实体后处理 ---
     entities = _normalize_entities(entities, q, intent)
+    # 快照用户原始约束，供后续 Reflection 和 answer 层引用。
+    # 放宽逻辑可能修改 entities（如把 min_years 下调），但「用户说的是什么」
+    # 必须保留——否则答案里的「筛选条件」会展示被篡改后的值。
+    entities.setdefault("_original", snapshot_original(entities))
+
     need_clarify = conf < CLARIFY_THRESHOLD
 
     return {

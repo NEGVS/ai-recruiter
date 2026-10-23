@@ -21,6 +21,7 @@ INTENTS: dict[str, str] = {
     "market_insight": "人才市场洞察：某技能供需、薪资基准、流动趋势",
     "policy_qa": "招聘政策/流程/制度问答（须走 RAG 知识库）",
     "chitchat": "与招聘无关的闲聊或元问题",
+    "confirm_interview": "确认面试时段（回复「确认第 N 个」「选第 N 个」「第 N 个时间」等）",
 }
 
 # ---------------------------------------------------------------- 关键词规则
@@ -35,6 +36,8 @@ _RULES: list[tuple[str, float, list[str]]] = [
     ("policy_qa", 1.0, ["政策", "流程", "制度", "规定", "允许吗", "报销", "多久通知", "需要提前",
                         "背调", "背景调查", "竞业", "有效期"]),
     ("job_recommend", 1.0, ["推荐岗位", "适合的岗位", "有什么岗位", "匹配岗位", "适合他"]),
+    ("confirm_interview", 1.0, ["确认第", "选第", "第一个时段", "第二个时段", "第三个时段",
+                                "选这个时间", "就选", "确认时间", "可以的", "好的第"]),
 ]
 
 # 制度性提问标记：出现这些措辞时，即使命中动作类关键词也应归为 policy_qa
@@ -114,6 +117,12 @@ def extract_skills(text: str) -> list[str]:
 def extract_entities(text: str) -> dict[str, Any]:
     """从自然语言抽取招聘场景实体。"""
     ents: dict[str, Any] = {}
+
+    # 面试时段确认序号：「确认第2个」「选第二个」→ _confirm_slot
+    _CN_NUM = {"一": 1, "二": 2, "三": 3, "1": 1, "2": 2, "3": 3}
+    m_slot = re.search(r"[确认选]第([一二三123])[个号时]", text)
+    if m_slot:
+        ents["_confirm_slot"] = _CN_NUM.get(m_slot.group(1), 1) - 1  # 0-indexed
 
     cities = [c for c in _CITY if c in text]
     if cities:
@@ -383,6 +392,15 @@ def rule_based_intent(text: str) -> dict[str, Any]:
                  r"[^，。；]{0,25}?(候选人|人选|简历|人)", text):
         scores["candidate_search"] = scores.get("candidate_search", 0) + 1.6
         reasons["candidate_search"] = reasons.get("candidate_search", "") + "；含检索数量+候选人表述"
+
+    # 面试确认：「确认第 N 个」「选第 N 个时段」→ confirm_interview，压制闲聊
+    m_confirm = re.search(r"确认|选第[一二三1-3]|好的.*时段|可以.*时间", text)
+    if m_confirm:
+        scores["confirm_interview"] = scores.get("confirm_interview", 0) + 2.5
+        reasons["confirm_interview"] = "面试时段确认表述"
+        for competing in ("chitchat", "policy_qa"):
+            if competing in scores:
+                scores[competing] *= 0.1
 
     if re.search(r"[一二三]面|初面|终面|安排.{0,3}面|约.{0,3}面", text):
         scores["interview_schedule"] = scores.get("interview_schedule", 0) + 1.4
