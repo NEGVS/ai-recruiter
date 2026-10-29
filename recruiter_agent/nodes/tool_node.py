@@ -142,18 +142,25 @@ def _bind_args(step: str, intent: str, e: dict, query: str = "") -> dict[str, An
         from datetime import date, timedelta
         today = date.today()
         wd = today.weekday()
-        if re.search(r"下周", e.get("_raw_query", "")):
+        if re.search(r"下周", query):
             args["date_from"] = (today + timedelta(days=7 - wd)).isoformat()
             args["date_to"] = (today + timedelta(days=13 - wd)).isoformat()
-        elif re.search(r"这周|本周", e.get("_raw_query", "")):
+        elif re.search(r"这周|本周", query):
             args["date_from"] = today.isoformat()
             args["date_to"] = (today + timedelta(days=6 - wd)).isoformat()
-        elif re.search(r"明天", e.get("_raw_query", "")):
+        elif re.search(r"明天", query):
             d = (today + timedelta(days=1)).isoformat()
             args["date_from"] = args["date_to"] = d
     elif step == "list_jobs":
         if e.get("cities"):
             args["city"] = e["cities"][0]
+        # 薪资在实体层统一折算成年薪；岗位表存的是月薪，这里换算回月薪再比较
+        if e.get("min_salary"):
+            args["min_salary"] = int(e["min_salary"]) // 12
+        if e.get("max_salary"):
+            args["max_salary"] = int(e["max_salary"]) // 12
+        if e.get("skills"):
+            args["skill"] = ",".join(e["skills"][:3])
     elif step == "schedule_interview":
         args["candidate"] = e.get("candidate_name") or e.get("candidate_id") or ""
         if e.get("date"):
@@ -269,7 +276,7 @@ def tool_node(state: RecruitState) -> dict:
 # 必填参数缺失时，向用户要什么
 _MISSING_QUESTIONS = {
     "get_candidate": "请告诉我要分析哪位候选人（姓名即可，例如「张伟」）。",
-    "get_job": "请告诉我要对比的岗位名称或岗位编号（例如「AI平台工程师」或「JD-1001」）。",
+    "get_job": "请告诉我要查哪个岗位（岗位名称或编号，例如「AI平台工程师」或「JD-1001」）。",
     "schedule_interview": "请告诉我要为哪位候选人安排面试。",
     "calc_offer": "请提供候选人的期望薪资（月薪或总包均可）。",
     "market_insight": "请说明要分析哪个方向（如 LLM、后端、算法）。",

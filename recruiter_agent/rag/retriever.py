@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,10 @@ SYNONYMS: dict[str, list[str]] = {
     "运维": ["SRE", "DevOps", "运维", "稳定性"],
 }
 
+# 方向词 → 代表技能。定义在 intent_rules（实体层也要用），这里直接复用，
+# 避免两处各维护一份导致「抽取时认、检索时不认」。
+from ..intent_rules import DIRECTION_SKILLS  # noqa: E402
+
 
 @dataclass
 class RetrievalResult:
@@ -58,6 +63,15 @@ def rewrite_query(query: str, entities: dict[str, Any], intent: str) -> tuple[st
         for syn in SYNONYMS.get(s, []):
             if syn.lower() != s.lower() and syn not in expanded:
                 expanded.append(syn)
+
+    # 方向词 → 代表技能：「找几个 985 毕业的算法」「推荐 3 个后端」里
+    # 「算法/后端」本身不是技能名，不展开就只能靠纯语义碰运气，
+    # 结果是把 LLM 候选人当成「后端」推荐出来。
+    for direction, skills in DIRECTION_SKILLS.items():
+        if re.search(direction, query):
+            for sk in skills:
+                if sk not in expanded:
+                    expanded.append(sk)
 
     parts: list[str] = []
     for k in ("job_title", "candidate_name"):
@@ -97,10 +111,13 @@ def build_filters(entities: dict[str, Any], query: str, intent: str) -> dict[str
             filters["min_years"] = float(entities["min_years"])
         if "max_years" in entities and not named_eval and "经验" not in negated:
             filters["max_years"] = float(entities["max_years"])
+        # 薪资单位换算：实体层统一折算成**年薪**，而候选人档案/向量库 metadata
+        # 里的 expected_salary 是**月薪**。早前直接把年薪当 filter 传下去，
+        # 「预算 2 万以内」= 240000 年薪，等于没有过滤——68K 月薪的人也进来了。
         if "max_salary" in entities and "薪资" not in negated and "薪酬" not in negated:
-            filters["max_salary"] = float(entities["max_salary"])
+            filters["max_salary"] = float(entities["max_salary"]) / 12
         if "min_salary" in entities and "薪资" not in negated and "薪酬" not in negated:
-            filters["min_salary"] = float(entities["min_salary"])
+            filters["min_salary"] = float(entities["min_salary"]) / 12
         if entities.get("job_intent") and "意向" not in negated:
             filters["job_intent"] = entities["job_intent"]
         if entities.get("tags") and "标签" not in negated:

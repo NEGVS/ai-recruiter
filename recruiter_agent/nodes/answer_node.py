@@ -158,6 +158,10 @@ def render_final(state: RecruitState, facts: str) -> str:
     top_n = (state.get("entities") or {}).get("top_n", 5)
 
     if intent == "job_recommend" and scores:
+        # 「北京月薪 5 万以上的岗位」这类只给条件、没给技能的查询，
+        # 结果里没有匹配分概念，必须走清单渲染，否则会出现一排 0.0 分。
+        if meta.get("mode") == "job_list":
+            return _render_job_list(state, scores, meta)
         return _render_job_recommend(state, scores, meta, s)
     if intent in ("candidate_search", "candidate_evaluate") and scores:
         return _render_ranking(state, scores, meta, s, top_n)
@@ -178,11 +182,72 @@ def render_final(state: RecruitState, facts: str) -> str:
     if intent == "job_recommend":
         note = meta.get("note") or "未找到可推荐的岗位"
         who = meta.get("candidate") or "该候选人"
+        # 自助模式（who == "你"）的缺失信息是「你的技能/年限」，不是「候选人姓名」，
+        # 两种场景的追问话术不能混用。
+        if who == "你":
+            return ("## 岗位推荐\n\n"
+                    f"还差一点信息才能匹配：{note}。\n\n"
+                    "可以这样告诉我：「6 年 Java，北京」「3 年数据开发，杭州」「只会 Python」。")
         return (f"## 岗位推荐\n\n暂未能为 {who} 生成岗位推荐：{note}。\n"
                 "请确认候选人姓名是否正确，或先确保有在招岗位。")
     if scores:
         return _render_ranking(state, scores, meta, s, top_n)
+    if state.get("intent") == "candidate_search":
+        return _render_empty_search(state)
     return "已完成处理，但未产出可展示的结论。建议补充更具体的需求（城市/技能/年限）。"
+
+
+def _render_empty_search(state: RecruitState) -> str:
+    """0 命中时给出可执行的诊断，而不是一句「未产出结论」。
+
+    招聘场景里「没人」有两种完全不同的原因：条件本身互斥（预算 2 万招 5 年 Java），
+    或者索引/后端有问题。用户需要知道是哪一条卡住的，下一步该松哪一条。
+    """
+    ent = state.get("entities") or {}
+    cond = []
+    if ent.get("skills"):
+        cond.append(f"技能 {'/'.join(ent['skills'][:5])}")
+    if ent.get("_direction_label"):
+        cond.append(f"方向 {ent['_direction_label']}")
+    if ent.get("cities"):
+        cond.append(f"城市 {'、'.join(ent['cities'])}")
+    if ent.get("min_years") is not None:
+        cond.append(f"{ent['min_years']:g}+ 年经验")
+    if ent.get("max_years") is not None:
+        cond.append(f"≤ {ent['max_years']:g} 年经验")
+    if ent.get("max_salary"):
+        cond.append(f"薪资 ≤ {ent['max_salary']//12000:.0f}K/月")
+    if ent.get("min_salary"):
+        cond.append(f"薪资 ≥ {ent['min_salary']//12000:.0f}K/月")
+
+    L = ["## 没有找到符合全部条件的候选人", ""]
+    L.append(f"**当前条件**：{' ｜ '.join(cond) if cond else '未识别到有效条件'}")
+    stats = state.get("retrieval_stats") or {}
+    L.append(f"**检索情况**：向量召回 {stats.get('dense', 0)} 条，"
+             f"关键词召回 {stats.get('bm25', 0)} 条，画像召回 {stats.get('profile', 0)} 条")
+
+    # 逐条给出「松哪一条最可能有效」的建议
+    tips: list[str] = []
+    if ent.get("max_salary"):
+        tips.append(f"薪资上限 {ent['max_salary']//12000:.0f}K/月偏紧——可以提高预算，"
+                    "或先看「预算内可培养」的候选人")
+    if ent.get("cities"):
+        tips.append("城市范围偏窄——可以扩大到周边城市或接受远程")
+    if ent.get("min_years") is not None:
+        tips.append(f"年限要求 {ent['min_years']:g} 年偏严——可下调 1-2 年，用项目经验补足")
+    if ent.get("skills"):
+        tips.append("硬技能要求偏严——可把其中一项移到「加分项」而不是硬性要求")
+    if ent.get("_school_tier"):
+        tips.append(f"院校限制（{ent['_school_tier']}）是一个强过滤器——放宽后通常能多出数倍候选")
+    if ent.get("_availability_max_days"):
+        tips.append(f"到岗时效要求 {ent['_availability_max_days']} 天内偏紧——放宽到 30 天可扩大池子")
+    if not tips:
+        tips.append("可以补充城市、年限或技能方向中的任意一项，我重新检索")
+    L.append("")
+    L.append("### 建议放宽的方向（按影响从大到小）")
+    for t in tips[:4]:
+        L.append(f"- {t}")
+    return "\n".join(L)
 
 
 def _render_ranking(state, scores, meta, s, top_n) -> str:
@@ -212,7 +277,14 @@ def _render_ranking(state, scores, meta, s, top_n) -> str:
     L.append(f"| # | 姓名 | 职位 | 年限 | 城市 | 总分 | 结论 |")
     L.append("|---|---|---|---|---|---|---|")
     for sc in scores:
-        verdict = "推荐" if sc.get("passed") else "备选"
+        # 一票否决的人不能显示为「备选」：硬技能完全不符还进推荐表，
+        # 用户会当成「系统推荐了这个人」——这是最容易被追问穿的点。
+        if sc.get("vetoed"):
+            verdict = "**不推荐**"
+        elif sc.get("passed"):
+            verdict = "推荐"
+        else:
+            verdict = "备选"
         L.append(f"| {sc['rank']} | **{sc['name']}** | {sc['title']} | "
                  f"{_years_of(state, sc['candidate_id'])} | {_city_of(state, sc['candidate_id'])} | "
                  f"**{sc['total']}** | {verdict} |")
@@ -220,7 +292,7 @@ def _render_ranking(state, scores, meta, s, top_n) -> str:
 
     L.append("### 逐人分析")
     for sc in scores:
-        mark = "✅" if sc.get("passed") else "⚠️"
+        mark = "⛔" if sc.get("vetoed") else ("✅" if sc.get("passed") else "⚠️")
         L.append(f"\n**{mark} {sc['rank']}. {sc['name']}（{sc['title']}，{_years_of(state, sc['candidate_id'])} 年 "
                  f"｜{_city_of(state, sc['candidate_id'])}）— {sc['total']} 分**")
         dims = sc.get("dimensions") or {}
@@ -274,6 +346,19 @@ def _render_ranking(state, scores, meta, s, top_n) -> str:
             L.append(f"- ⚠️ Top1「{top['name']}」主要风险：{top['risks'][0]}")
         L.append(f"- 下一步：约面 → 面试 → offer 测算。急招岗位可先锁定 {passed[0]['name']}、{passed[1]['name'] if len(passed) > 1 else passed[0]['name']}。")
     L.append(f"\n_评分维度权重：{_weights_str(meta.get('weights') or s.scoring_weights)}_")
+    return "\n".join(L)
+
+
+def _render_job_list(state: RecruitState, scores, meta) -> str:
+    """按条件列岗位（无候选人画像时的求职者入口）。"""
+    L: list[str] = ["## 符合条件的在招岗位",
+                    f"**筛选**：{meta.get('note') or '全部在招岗位'} ｜ 共 {len(scores)} 个\n"]
+    L.append("| # | 岗位 | 城市/层级/薪资 | 剩余 HC |")
+    L.append("|---|---|---|---|")
+    for sc in scores:
+        hc = next((e for e in (sc.get("evidence") or []) if "HC" in e), "剩余 HC -")
+        L.append(f"| {sc['rank']} | **{sc['name']}** | {sc['title']} | {hc.replace('剩余 HC ', '')} |")
+    L.append("\n> 告诉我你的技能方向和年限，我可以进一步按匹配度排序并给出投递建议。")
     return "\n".join(L)
 
 

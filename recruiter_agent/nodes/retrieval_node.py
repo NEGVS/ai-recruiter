@@ -149,6 +149,11 @@ def score_node(state: RecruitState) -> dict:
     # 早前用 max(...,5) 会让「找 2 个」返回 3 个——擅自扩容与擅自放宽同属越权。
     profiles = _load_profiles()
     top_n = _requested_top_n(entities, default=5)
+    # 硬约束：院校层次 / 到岗时效。这两类条件在检索阶段无法表达（向量库里
+    # 没有 school_tier 字段），但又必须真正把不合格的人剔除——只做扣分等于没筛。
+    from ..intent_rules import school_matches
+    school_tier = entities.get("_school_tier")
+    avail_max = entities.get("_availability_max_days")
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     for c in chunks:
@@ -156,7 +161,11 @@ def score_node(state: RecruitState) -> dict:
         if cid in seen:
             continue
         seen.add(cid)
-        prof = profiles.get(cid)
+        prof = profiles.get(cid) or {}
+        if school_tier and not school_matches(str(prof.get("school", "")), school_tier):
+            continue
+        if avail_max is not None and int(prof.get("availability_days", 30) or 30) > int(avail_max):
+            continue
         cand = _to_candidate(cid, prof, c)
         sb = score_candidate(cand, job, c, s)
         d = {
@@ -247,6 +256,10 @@ def _score_jobs_for_candidate(entities: dict, s) -> dict:
     else:
         cand = _candidate_from_self(entities)
         if cand is None:
+            # 只给了城市/预算（「北京月薪 5 万以上的岗位」）——用户要的是**岗位清单**，
+            # 不是岗位匹配打分。直接按条件列岗位，别去要「技能和年限」。
+            if entities.get("cities") or entities.get("min_salary") or entities.get("max_salary"):
+                return _list_jobs_by_condition(jobs, entities, s)
             return {"scores": [], "score_meta": {
                 "count": 0, "mode": "job_recommend", "candidate": "你",
                 "note": "请补充你的技能方向、工作年限和城市（例如：6 年 Java，北京）"}}
@@ -332,19 +345,69 @@ def _resolve_job(entities: dict, state: RecruitState) -> JobRequisition:
         )
 
     # 虚拟 JD：把检索条件本身当作要求来源，评分全程有据可依
-    skills = entities.get("skills", [])
+    # 用户只说方向（「找 3 个后端」）时 skills 为空，这里用方向词展开出的代表技能
+    # 作为硬技能——否则硬技能维度没有要求，任何人都是满分，「后端」就变成了「谁分高给谁」。
+    skills = entities.get("skills") or entities.get("_direction_skills") or []
     min_y = float(entities.get("min_years") or 0)
     max_y = float(entities.get("max_years") or (min_y + 3 if min_y else 8))
     sal_min = int(entities.get("min_salary") or 0)
     sal_max = int(entities.get("max_salary") or 0) or max(sal_min + 20000, 80000)
     return JobRequisition(
-        job_id="JD-QUERY", title=entities.get("job_title") or "按检索条件匹配",
+        job_id="JD-QUERY",
+        title=entities.get("job_title") or entities.get("_direction_label") or "按检索条件匹配",
         city=(entities.get("cities") or ["不限"])[0], level=f"{min_y:.0f}-{max_y:.0f}",
         min_years=min_y, max_years=max_y, salary_range=(sal_min, sal_max),
         hard_skills=skills, nice_skills=[], domains=[],
         education_req=entities.get("education") or "不限", urgency="normal",
         description="由用户检索条件动态构造的虚拟 JD",
     )
+
+
+def _list_jobs_by_condition(jobs: list[dict], entities: dict, s) -> dict:
+    """按城市/预算列出岗位（不做候选人匹配打分）。
+
+    用于求职者只给了「城市 + 预算」的情况——他还没说自己会什么，
+    强行要求「技能+年限」等于答非所问。薪资在实体层是年薪，岗位表是月薪。
+    """
+    city = (entities.get("cities") or [None])[0]
+    min_m = (entities.get("min_salary") or 0) / 12 if entities.get("min_salary") else 0
+    max_m = (entities.get("max_salary") or 0) / 12 if entities.get("max_salary") else 0
+
+    hits = []
+    for j in jobs:
+        if city and j.get("city") != city:
+            continue
+        if min_m and float(j.get("salary_max", 0)) < min_m:
+            continue
+        if max_m and float(j.get("salary_min", 0)) > max_m:
+            continue
+        hits.append(j)
+
+    results = []
+    for j in hits:
+        results.append({
+            "candidate_id": j.get("job_id", ""),
+            "name": j.get("title", ""),
+            "title": f"{j.get('city', '')}｜{j.get('level', '')}｜"
+                     f"{j.get('salary_min', 0)//1000:.0f}-{j.get('salary_max', 0)//1000:.0f}K",
+            "total": 0.0,
+            "dimensions": {}, "reasons": [], "risks": [],
+            "evidence": [f"剩余 HC {j.get('headcount', '-')}"],
+            "vetoed": False, "passed": True,
+        })
+    for i, r in enumerate(results, 1):
+        r["rank"] = i
+    return {
+        "scores": results,
+        "score_meta": {
+            "count": len(results), "mode": "job_list", "candidate": "你",
+            "note": f"按{'城市 ' + city if city else ''}"
+                    f"{' ｜ 预算 ≥ ' + str(int(min_m/1000)) + 'K/月' if min_m else ''}"
+                    f"{' ｜ 预算 ≤ ' + str(int(max_m/1000)) + 'K/月' if max_m else ''} 筛选",
+            "pass_score": s.pass_score,
+            "passed": len(results), "vetoed": 0, "weights": s.scoring_weights,
+        },
+    }
 
 
 _profiles_cache: dict | None = None
@@ -356,7 +419,9 @@ def _candidate_from_self(entities: dict) -> Candidate | None:
     只要求「技能方向」或「年限」至少有一项，否则连岗位方向都判断不了，
     交给调用方反问用户。城市/期望薪资是加分项，缺失不影响匹配。
     """
-    skills = [s for s in (entities.get("skills") or []) if s]
+    # 方向词（「做数据开发」「后端方向」）也要算作技能，否则虚拟候选人没有任何技能，
+    # 所有岗位都会因「硬技能零命中」被一票否决。
+    skills = [s for s in ((entities.get("skills") or []) + (entities.get("_direction_skills") or [])) if s]
     years = entities.get("min_years")
     if not skills and years is None:
         return None

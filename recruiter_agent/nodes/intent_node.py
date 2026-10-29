@@ -130,15 +130,17 @@ def _normalize_entities(entities: dict, query: str, intent: str) -> dict:
             entities.pop("top_n", None)
     entities.setdefault("top_n", 5 if intent in ("candidate_search", "candidate_evaluate") else 3)
 
-    # 薪资：extract_entities 已统一折算为年薪，此处只做区间归一
+    # 薪资：extract_entities 已统一折算为年薪，并判定了「以上/以内」方向。
+    # 这里只在方向未判定时才兜底，不能无条件覆盖：
+    # 早前「月薪 30k 以上」被再补一个 max_salary=30k，变成 min=max=30k，
+    # 一个既 ≥30k 又 ≤30k 的空区间，结果永远是 0 人。
     if isinstance(entities.get("salary_kw"), list) and entities["salary_kw"]:
         vals = [int(v) for v in entities["salary_kw"]]
-        if len(vals) == 1:
-            entities["max_salary"] = vals[0]
-        else:
+        if "max_salary" not in entities and "min_salary" not in entities:
             entities["max_salary"] = max(vals)
-            entities["min_salary"] = min(vals)
-        entities["expected_salary"] = vals[-1]
+            if len(vals) > 1:
+                entities["min_salary"] = min(vals)
+        entities.setdefault("expected_salary", vals[-1])
 
     # 清理空值：None 会污染 Trace 摘要，也会让下游 `.get()` 判断失真
     entities = {k: v for k, v in entities.items() if v is not None and v != [] and v != {}}

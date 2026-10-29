@@ -254,6 +254,36 @@ class RecruitAgent:
                 ents["_pending_slots"] = ctx["pending_slots"]
             init["entities"] = ents
 
+        # 「上次推荐的那几个人怎么样了」：回到上一轮结果，而不是拿一句话重新检索。
+        # 这类追问没有可抽取的条件，走图只会得到一堆与新问题无关的人，
+        # 而且用户已经明确指向「上次那几个人」。
+        import re as _re
+        if ctx.get("last_results") and _re.search(
+                r"上次|刚才|之前|上轮|刚刚", query) and _re.search(
+                r"那几个|推荐|结果|怎么样|进展|如何|谁", query):
+            items = ctx["last_results"]
+            lines = ["## 上次推荐的候选人", ""]
+            lines.append("| # | 姓名 | 职位 | 总分 | 结论 |")
+            lines.append("|---|---|---|---|---|")
+            for i, s in enumerate(items, 1):
+                verdict = "**不推荐**" if s.get("vetoed") else ("推荐" if s.get("passed") else "备选")
+                lines.append(f"| {i} | **{s.get('name')}** | {s.get('title', '-')} | "
+                             f"{s.get('total')} | {verdict} |")
+            if ctx.get("last_results_query"):
+                lines.append(f"\n> 上一轮问题：{ctx['last_results_query']}")
+            lines.append("\n需要我针对其中某位继续推进吗？可以说「和张伟约面试」「给张伟测算 offer」"
+                         "或「评估张伟和 XX 岗位的匹配度」。")
+            answer = "\n".join(lines)
+            return {
+                "query": query, "answer": answer, "intent": "candidate_search",
+                "intent_confidence": 1.0, "entities": init.get("entities") or {},
+                "plan": [], "tool_results": [], "retrieval_stats": {},
+                "shortlist": items, "score_meta": {"mode": "session_recall"},
+                "reranked": [], "reflection": None, "reflection_history": [],
+                "answer_meta": {"type": "session_recall"}, "trace": [], "total_ms": 0,
+                "errors": [],
+            }
+
         t0 = time.time()
         final = self.graph.invoke(init, config={
             "recursion_limit": 40,
@@ -281,6 +311,18 @@ class RecruitAgent:
         elif not pending_iv:
             # 面试已确认 → 清空缓存，避免下次串台
             self._session.pop(session_id, None)
+
+        # 记录本轮推荐结果，供「上次推荐的那几个人怎么样了」这类追问使用。
+        # 只记候选人的最小信息（名字/分数/是否通过），不缓存 whole chunk。
+        scored = final.get("scores") or []
+        if final.get("intent") in ("candidate_search", "candidate_evaluate") and scored:
+            self._session.setdefault(session_id, {})["last_results"] = [
+                {"name": s.get("name"), "total": s.get("total"),
+                 "passed": s.get("passed"), "vetoed": s.get("vetoed"),
+                 "title": s.get("title")}
+                for s in scored[:8]
+            ]
+            self._session[session_id]["last_results_query"] = query
 
         return {
             "query": query,

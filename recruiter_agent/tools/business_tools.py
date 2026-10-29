@@ -453,7 +453,9 @@ class ListJobsTool(BaseTool):
     name = "list_jobs"
     description = "列出当前在招岗位及其 headcount、紧急度"
     required = []
-    optional = {"city": "按城市过滤", "urgent_only": "yes 仅看急招岗位"}
+    optional = {"city": "按城市过滤", "urgent_only": "yes 仅看急招岗位",
+                "min_salary": "岗位薪资下限（月薪，元）", "max_salary": "岗位薪资上限（月薪，元）",
+                "skill": "岗位硬技能关键词，逗号分隔"}
 
     def run(self, **kw: Any) -> ToolResult:
         conds, params, obs = [], [], []
@@ -464,6 +466,16 @@ class ListJobsTool(BaseTool):
         if str(kw.get("urgent_only", "")).lower() in ("yes", "true", "1"):
             conds.append("urgency='high'")
             obs.append("仅急招")
+        # 岗位薪资按「月薪」存库（salary_min/salary_max）；检索侧统一用年薪，
+        # 调用方传进来的是月薪口径，这里直接按月薪比较。
+        if kw.get("min_salary") not in (None, ""):
+            conds.append("salary_max >= ?")
+            params.append(float(kw["min_salary"]))
+            obs.append(f"岗位上限 ≥ {float(kw['min_salary'])/1000:.0f}K")
+        if kw.get("max_salary") not in (None, ""):
+            conds.append("salary_min <= ?")
+            params.append(float(kw["max_salary"]))
+            obs.append(f"岗位下限 ≤ {float(kw['max_salary'])/1000:.0f}K")
         where = (" WHERE " + " AND ".join(conds)) if conds else ""
         with sqlite3.connect(DB_PATH) as con:
             con.row_factory = sqlite3.Row

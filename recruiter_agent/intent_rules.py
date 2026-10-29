@@ -81,6 +81,47 @@ _JOB_REC_VERB = re.compile(r"推荐|适合|匹配|能投|可投|投递|合适|�
 _CITY = ["北京", "上海", "深圳", "广州", "杭州", "成都", "南京", "武汉", "西安", "苏州",
          "合肥", "长沙", "青岛", "厦门", "天津", "重庆", "东莞", "佛山", "宁波", "郑州"]
 
+# 院校层次名单（用于「985 毕业的」「211 院校」这类硬筛选）。
+# 只收录库内可能出现的校名；未收录的名校按「不匹配 985」处理，
+# 宁可漏判也不要错把普通院校算进 985。
+SCHOOL_TIER_985: tuple[str, ...] = (
+    "清华大学", "北京大学", "复旦大学", "上海交通大学", "浙江大学", "中山大学",
+    "华南理工大学", "北京理工大学", "武汉大学", "哈尔滨工业大学", "北京航空航天大学",
+    "同济大学", "西安交通大学", "南京大学", "中国科学技术大学", "东南大学", "天津大学",
+    "南开大学", "山东大学", "四川大学", "厦门大学", "吉林大学", "湖南大学", "中南大学",
+)
+SCHOOL_TIER_211: tuple[str, ...] = SCHOOL_TIER_985 + (
+    "北京邮电大学", "华北电力大学", "北京交通大学", "上海大学", "苏州大学",
+    "郑州大学", "暨南大学", "合肥工业大学", "西南交通大学", "南京航空航天大学",
+)
+
+
+def school_matches(school: str, tier: str | None) -> bool:
+    """判断院校是否属于指定层次；未指定层次时一律通过。"""
+    if not tier:
+        return True
+    if not school:
+        return False
+    if tier == "985":
+        return any(school.startswith(n) or n in school for n in SCHOOL_TIER_985)
+    if tier == "211":
+        return any(school.startswith(n) or n in school for n in SCHOOL_TIER_211)
+    return True
+
+
+# 方向词 → 代表技能。招聘口语里「找个后端」「985 的算法」给的是方向而不是技能名；
+# 不展开就只能靠纯语义碰运气，容易把 LLM 候选人当成「后端」推荐出来。
+# 放在本模块是为了让实体层（extract_entities）和检索层（rewrite_query）
+# 共用同一份定义——retriever 已经 import 了 intent_rules，反向引用会循环导入。
+DIRECTION_SKILLS: dict[str, list[str]] = {
+    "后端|服务端": ["Java", "Go", "Spring", "MySQL", "Redis", "分布式", "高并发", "微服务"],
+    "前端|web前端": ["Vue", "React", "TypeScript", "Webpack", "小程序"],
+    "算法|机器学习": ["机器学习", "深度学习", "推荐系统", "NLP", "PyTorch"],
+    "数据|数仓|大数据": ["Spark", "Flink", "数仓", "Hive", "数据仓库"],
+    "测试|QA": ["自动化测试", "性能测试", "Pytest", "JMeter"],
+    "运维|SRE": ["Kubernetes", "Docker", "Linux", "DevOps", "Prometheus"],
+}
+
 _SKILL_DICT: dict[str, list[str]] = {
     "语言": ["Python", "Java", "Go", "Golang", "C++", "Rust", "Scala", "Kotlin", "TypeScript",
              "JavaScript", "SQL", "Shell", "Rust", "PHP", "C#"],
@@ -148,6 +189,15 @@ def extract_entities(text: str) -> dict[str, Any]:
     skills = extract_skills(text)
     if skills:
         ents["skills"] = skills
+    # 方向词（后端/前端/算法/数据/测试/运维）不是具体技能名，但用户就是按方向找人。
+    # 抽成 _direction_skills：检索层用它展开查询，评分层拿它当硬技能要求，
+    # 否则「推荐 3 个后端」的硬技能要求为空，任何候选人硬技能都能拿满分。
+    if not skills:
+        for direction, dskills in DIRECTION_SKILLS.items():
+            if re.search(direction, text):
+                ents["_direction_skills"] = list(dskills)
+                ents["_direction_label"] = re.split(r"\|", direction)[0]
+                break
 
     # 年限：按「方向」分别收集，而不是把出现的所有数字当成一个区间。
     # 期望语义：
@@ -228,6 +278,19 @@ def extract_entities(text: str) -> dict[str, Any]:
         ents["job_intent"] = "active"
     if "被动" in text or "没在看" in text:
         ents["job_intent"] = "passive"
+
+    # 到岗时效：「马上到岗 / 尽快到岗 / 随时到岗」是一票否决级别的硬约束，
+    # 早前只当成措辞，导致推荐了 30 天后才能到岗的人。
+    if re.search(r"马上到岗|马上入职|尽快到岗|随时到岗|立刻到岗|一周内到岗", text):
+        ents["_availability_max_days"] = 15
+    elif re.search(r"两周内|半个月内", text):
+        ents["_availability_max_days"] = 15
+
+    # 院校层次：985 / 211。只记录层次，具体名校名单见 SCHOOL_TIER_*。
+    if re.search(r"985", text):
+        ents["_school_tier"] = "985"
+    elif re.search(r"211", text):
+        ents["_school_tier"] = "211"
 
     # 数字 -> 人数 / 薪资
     # 负向后视：「12000 一个月」「3 个月」里的「一/个」不是人数，
@@ -388,10 +451,11 @@ def _extract_person_name(text: str, skills: list[str], cities: list[str]) -> str
     # 另外要求**前面有明确的「主语引入语」**（句首 / 给 / 评估 / 推荐 / 这位 等），
     # 否则「…方向的候选人」这类短语会产出「向候选人」这种伪姓名。
     tail = (r"(?=[的和与跟，,。；;？?！!\s]|评估|推荐|匹配|适合|简历|情况|背景|经历|表现|"
+            r"现在|目前|最近|状态|进展|怎么样|如何|什么情况|"
             r"能|是否|可以|测算|安排|约|看|一面|二面|三面|面试|明|今|后|下|上|周|明天|今天|"
             r"下一|这一|$)")
     lead = (r"(?:^|[，,。；;？?！!\s]|给|为|帮|请|评估|评价|分析|推荐|看看|查|找|联系|约|"
-            r"安排|这位|那个|候选|叫做|名叫|和|与|跟|让|叫)")
+            r"安排|这位|那个|候选|叫做|名叫|和|与|跟|让|叫|把|向|问|对)")
     pattern = rf"{lead}\s*([{_SURNAMES}][一-龥]{{1,3}}?){tail}"
     for m in re.finditer(pattern, text):
         cand = m.group(1)
@@ -499,7 +563,8 @@ def _mask_salary(text: str) -> str:
 
 # ---------------------------------------------------------------- 市场主题
 def _extract_market_topic(text: str, skills: list[str], cities: list[str]) -> str | None:
-    if not re.search(r"市场|行情|供需|紧缺|热度", text):
+    if not re.search(r"市场|行情|供需|紧缺|热度|好找工作|好不好找工作|什么水平|能招到|"
+                     r"薪资|工资|待遇|多少钱", text):
         return None
     cleaned = text
     for c in cities:
@@ -512,7 +577,14 @@ def _extract_market_topic(text: str, skills: list[str], cities: list[str]) -> st
             t = _JOB_NOISE_TAIL.sub("", m.group(1).strip("的了和与跟 ")).strip()
             if t and len(t) >= 2 and t not in ("人才", "技术", "招聘"):
                 return t
-    return skills[0] if skills else None
+    if skills:
+        return skills[0]
+    # 只说了方向（「12000 一个月能招到什么水平的前端」）→ 用方向标签当主题，
+    # 否则主题退化成「技术」，库内命中恒为 0。
+    for direction in DIRECTION_SKILLS:
+        if re.search(direction, text):
+            return re.split(r"\|", direction)[0]
+    return None
 
 
 # ---------------------------------------------------------------- 规则意图识别
